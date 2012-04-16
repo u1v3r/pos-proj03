@@ -2,7 +2,7 @@
 #define _XOPEN_SOURCE
 #define _XOPEN_SOURCE_EXTENDED 1
 
-#define DEBUG
+/*#define DEBUG*/
 #define BUFFER_SIZE 512
 #define SHELL_TEXT "shell> "
 #undef getchar/*treba zistit ci je getchar threadsafe*/
@@ -237,33 +237,53 @@ void call_cmd(void){
         return;
     }
 
+    /*char *cmds_argv[BUFFER_SIZE];
+    char *output_name;*/
+
     /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
     for(j = 0; j < i; j++){
 
         /* presmerovanie vystupu */
         if(strcmp(argv[j],">") == 0){
 
-            ssize_t w_size;
+            pid_t pid;
 
+            if((pid = fork()) == 0){
 
-            /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
-            int desc = open("test",O_CREAT|O_WRONLY,S_IWUSR|S_IRUSR|S_IRGRP|S_IROTH);
+                /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
+                int desc = open(argv[j+1],O_CREAT|O_WRONLY,S_IWUSR|S_IRUSR|S_IRGRP|S_IROTH);
 
+                if(desc == -1){
+                    perror("open file");
+                    return;
+                }
 
-            if(desc == -1){
-                perror("open file");
-                return;
+                /* presmerovanie stdout a do suboru */
+                dup2(desc,STDOUT_FILENO);
+
+                /* treba zobrazit chybove hlasky na stdout */
+                dup2(STDERR_FILENO,STDOUT_FILENO);
+
+                /* potrebujeme len prikaz pred > */
+                argv[j] = NULL;
+
+                /* zavola prikaz */
+                call_execvp(argv[0],argv);
+
+                /* ukonci child */
+                exit(EXIT_SUCCESS);
+
+            }else if(pid > 0){/* parent */
+
+                /* pockaj na dokoncenie child */
+                wait(NULL);
+
+            }else{/* chyba */
+
+                perror("fork");
+
             }
 
-            char *text = "toto je text";
-            w_size = write(desc,text,sizeof(buffer));
-            if(w_size == -1){
-                perror("write");
-                close(desc);
-                return;
-            }
-
-            close(desc);
             return;
         }
 
@@ -273,8 +293,6 @@ void call_cmd(void){
             return;
         }
     }
-
-
 
 
     /*
