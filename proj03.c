@@ -2,7 +2,7 @@
 #define _XOPEN_SOURCE
 #define _XOPEN_SOURCE_EXTENDED 1
 
-#define DEBUG
+/*#define DEBUG*/
 #define BUFFER_SIZE 512
 #define SHELL_TEXT "shell> "
 #undef getchar/*treba zistit ci je getchar threadsafe*/
@@ -14,6 +14,14 @@
 #include <signal.h>
 #include <errno.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+
+void sig_handler(int sig);
+void *read_input(void *p);
+void *exec_cmd(void *p);
+void call_cmd(void);
+
 
 char *buffer;
 volatile sig_atomic_t program_exit = 0; /* ukoncenie programu */
@@ -22,64 +30,11 @@ pthread_cond_t cond;
 pthread_mutex_t mutex;
 
 void sig_handler(int sig){
-
+    #ifdef DEBUG
+        printf("\n\nsingal\n\n");
+    #endif
     /* DOCASNE - IMPLENENTOVAT UKONCENIE PROCESU NA POZADI */
     program_exit = 1;
-}
-
-void *read_input(void *p){
-
-    int rlen;
-
-    while(!program_exit){
-        pthread_mutex_lock(&mutex);
-
-        /* ak nie je buffer prazdny, tak cakaj */
-        while(strlen(buffer) > 0)
-                pthread_cond_wait(&cond,&mutex);
-
-        /* nacitaj vstup a ak je prilis dlhy tak chyba */
-        if((rlen = read(STDIN_FILENO,buffer,BUFFER_SIZE)) == -1){
-            exit(EXIT_FAILURE);
-        }
-
-        /* ak je spravne velkost vstupu moze sa spracovat */
-        if(rlen < BUFFER_SIZE){
-            pthread_cond_signal(&cond);
-        }else{
-            printf("Error: Input is too long %d \n",rlen);
-            /* vyprazdni stdin a buffer */
-            while (getchar() != '\n');
-            memset(buffer, 0, BUFFER_SIZE);
-        }
-
-        pthread_mutex_unlock(&mutex);
-    }
-
-    return (void *) 0;
-}
-
-void *exec_cmd(void *p){
-
-    while(!program_exit){
-
-        /* treba pockat na signal od input vlakna */
-        pthread_mutex_lock(&mutex);
-
-        /* ak je prazdny buffer tak cakaj */
-        while(strlen(buffer) == 0)
-            pthread_cond_wait(&cond,&mutex);
-
-        printf("cmd:%s",buffer);
-
-        /* vyprazdni buffer */
-        memset(buffer, 0,BUFFER_SIZE);
-        pthread_cond_signal(&cond);
-
-        pthread_mutex_unlock(&mutex);
-    }
-
-    return (void *) 0;
 }
 
 int main(int argc, char* argv[], char **envp){
@@ -87,6 +42,7 @@ int main(int argc, char* argv[], char **envp){
     struct sigaction sigact;
     pthread_attr_t attr;
     int res;
+
 
     if((buffer = (char *)malloc(sizeof(char) * BUFFER_SIZE)) == NULL){
         printf("buffer mallock error\n");
@@ -100,6 +56,13 @@ int main(int argc, char* argv[], char **envp){
     if(sigaction(SIGINT,&sigact,NULL)){
 		printf("sigaction() error\n");
 		return 1;
+	}
+
+    if(fork() == 0) {
+		execvp("clear", argv);
+		exit(1);
+	} else {
+		wait(NULL);
 	}
 
 	if((res = pthread_mutex_init(&mutex,NULL)) != 0){
@@ -152,3 +115,109 @@ int main(int argc, char* argv[], char **envp){
 
 	return 0;
 }
+
+void *read_input(void *p){
+
+    int rlen;
+
+    while(!program_exit){
+        pthread_mutex_lock(&mutex);
+
+        /* ak nie je buffer prazdny, tak cakaj */
+        while(strlen(buffer) > 0)
+                pthread_cond_wait(&cond,&mutex);
+
+        /* zobrazi shell text */
+        printf(SHELL_TEXT);
+        fflush(stdout);
+
+        /* nacitaj vstup a ak je prilis dlhy tak chyba */
+        if((rlen = read(STDIN_FILENO,buffer,BUFFER_SIZE)) == -1){
+            exit(EXIT_FAILURE);
+        }
+
+        /* ak je spravne velkost vstupu moze sa spracovat */
+        if(rlen < BUFFER_SIZE){
+            pthread_cond_signal(&cond);
+        }else{
+            printf("Error: Input is too long %d \n",rlen);
+            /* vyprazdni stdin a buffer */
+            while (getchar() != '\n');
+            memset(buffer, 0, BUFFER_SIZE);
+        }
+
+        pthread_mutex_unlock(&mutex);
+    }
+
+    return (void *) 0;
+}
+
+void *exec_cmd(void *p){
+
+    while(!program_exit){
+
+        /* treba pockat na signal od input vlakna */
+        pthread_mutex_lock(&mutex);
+
+        /* ak je prazdny buffer tak cakaj */
+        while(strlen(buffer) == 0)
+            pthread_cond_wait(&cond,&mutex);
+
+        call_cmd();
+
+        /* vyprazdni buffer */
+        memset(buffer, 0,BUFFER_SIZE);
+        pthread_cond_signal(&cond);
+
+        pthread_mutex_unlock(&mutex);
+
+
+    }
+
+    return (void *) 0;
+}
+
+void call_cmd(void){
+
+    #ifdef DEBUG
+        printf("prikaz:%s",buffer);
+    #endif
+
+    pid_t id;
+    int status,i = 0;
+    char *argv[100];
+    char *ret_token;
+    char *rest = "";
+
+    /* prechadza cely retazec a vytvara pole */
+    while((ret_token = strtok_r(buffer, " ", &rest)) != NULL){
+        /* odstrani znak noveho riadku */
+        if(ret_token[strlen(ret_token) - 1] == '\n'){
+            ret_token[strlen(ret_token) - 1] = 0;
+        }
+        argv[i++] = ret_token;
+        buffer = rest;
+    }
+
+    /* na poslednu poziciu NULL */
+    argv[i] = NULL;
+
+    if((id = fork()) == -1){
+        printf("fork error\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* child vykona prikaz a rodic pocka na jeho dokoncenie */
+    if(id == 0){
+        if(execvp(argv[0],argv) == -1){
+            printf("execvp error\n");
+            exit(EXIT_FAILURE);
+        }
+    }else{
+        if(waitpid(id,&status,0) == -1){
+            printf("waitpid error\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
