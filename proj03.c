@@ -4,7 +4,8 @@
 
 /*#define DEBUG*/
 #define BUFFER_SIZE 512
-#define SHELL_TEXT "shell> "
+#define SHELL_TEXT "dsh"
+#define SHELL_COLOR 32 /* zelena */
 #undef getchar/*treba zistit ci je getchar threadsafe*/
 
 #include <stdio.h>
@@ -136,7 +137,7 @@ void *read_input(void *p){
                 pthread_cond_wait(&cond,&mutex);
 
         /* zobrazi shell text */
-        printf(SHELL_TEXT);
+        printf("\033[%dm\033[1m%s>\033[m\033[m ",SHELL_COLOR,SHELL_TEXT);
         fflush(stdout);
 
         /* nacitaj vstup a ak je prilis dlhy tak chyba */
@@ -225,7 +226,7 @@ void call_cmd(void){
     /* ak je prikaz cd */
     if(strcmp(argv[0],"cd") == 0){
         if(chdir(argv[1]) != 0){
-            perror("shell: cd");
+            perror("dsh: cd");
         }
 
         return;
@@ -266,7 +267,7 @@ void call_cmd(void){
                 if(execvp(argv[0],argv) == -1){
                     /* chybu treba zobrazit */
                     dup2(STDERR_FILENO,STDOUT_FILENO);
-                    printf("shell: %s: command not found\n",argv[0]);
+                    printf("%s: %s: command not found\n",SHELL_TEXT,argv[0]);
                     exit(EXIT_FAILURE);
                 }
 
@@ -292,7 +293,48 @@ void call_cmd(void){
 
         /* presmerovanie vstupu */
         if(strcmp(argv[j],"<") == 0){
-            printf("presmerovanie vstupu");
+
+            pid_t pid;
+
+            if((pid = fork()) == 0){
+
+                /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
+                int desc = open(argv[j+1],O_RDONLY);
+
+                if(desc == -1){
+                    perror(SHELL_TEXT);
+                    exit(EXIT_FAILURE);
+                }
+
+                /* presmerovanie na vstup */
+                dup2(desc,STDIN_FILENO);
+
+                /* potrebujeme len prikaz pred > */
+                argv[j] = NULL;
+
+                /* zavola prikaz */
+                if(execvp(argv[0],argv) == -1){
+                    printf("%s: %s: command not found\n",SHELL_TEXT,argv[0]);
+                    exit(EXIT_FAILURE);
+                }
+
+                /* zatvor subor */
+                close(desc);
+
+                /* ukonci child */
+                exit(EXIT_SUCCESS);
+
+            }else if(pid > 0){/* parent */
+
+                /* pockaj na dokoncenie child */
+                wait(NULL);
+
+            }else{/* chyba */
+
+                perror("fork");
+
+            }
+
             return;
         }
     }
@@ -318,7 +360,7 @@ void call_execvp(char *cmd, char *argv[]){
     /* child vykona prikaz a rodic pocka na jeho dokoncenie */
     if(id == 0){
         if(execvp(argv[0],argv) == -1){
-            printf("shell: %s: command not found\n",argv[0]);
+            printf("%s: %s: command not found\n",SHELL_TEXT,argv[0]);
             exit(EXIT_FAILURE);
         }
     }else{
