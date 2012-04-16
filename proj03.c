@@ -2,7 +2,7 @@
 #define _XOPEN_SOURCE
 #define _XOPEN_SOURCE_EXTENDED 1
 
-/*#define DEBUG*/
+#define DEBUG
 #define BUFFER_SIZE 512
 #define SHELL_TEXT "shell> "
 #undef getchar/*treba zistit ci je getchar threadsafe*/
@@ -21,7 +21,7 @@ void sig_handler(int sig);
 void *read_input(void *p);
 void *exec_cmd(void *p);
 void call_cmd(void);
-
+void call_execvp(char *cmd, char *argv[]);
 
 char *buffer;
 volatile sig_atomic_t program_exit = 0; /* ukoncenie programu */
@@ -179,12 +179,15 @@ void *exec_cmd(void *p){
 
 void call_cmd(void){
 
+    /* spracovavat prazdne prikazy nema vyznam */
+    if(strlen(buffer) < 2) return;
+
     #ifdef DEBUG
         printf("prikaz:%s",buffer);
     #endif
 
-    pid_t id;
-    int status,i = 0;
+
+    int i = 0;
     char *argv[100];
     char *ret_token;
     char *rest = "";
@@ -202,6 +205,46 @@ void call_cmd(void){
     /* na poslednu poziciu NULL */
     argv[i] = NULL;
 
+    #ifdef DEBUG
+        int j;
+        printf("\nDEBUG\n");
+        for(j = 0; j < i; j++){
+            printf("argv %d: %s\n",j,argv[j]);
+        }
+        printf("\n");
+    #endif
+
+    /* ak je prikaz cd */
+    if(strcmp(argv[0],"cd") == 0){
+        if(chdir(argv[1]) != 0){
+            perror("shell: cd");
+        }
+
+        return;
+    }
+
+    /* kontorla ci parameter neobsahuje presmerovanie vystupu > */
+
+
+
+    /* TREBA IMPLENTOVAT NECO ROZUMNEJSIE  */
+    if(strcmp(argv[0],"exit") == 0){
+        program_exit = 1;
+        return;
+    }
+
+    /*
+     * vykonnanie samostatneho prikazu bez presmerovania vstupu/vystupu
+     * alebo spustenia na pozadi
+     */
+    call_execvp(argv[0],argv);
+}
+
+void call_execvp(char *cmd, char *argv[]){
+
+    pid_t id;
+    int status;
+
     if((id = fork()) == -1){
         printf("fork error\n");
         exit(EXIT_FAILURE);
@@ -210,7 +253,7 @@ void call_cmd(void){
     /* child vykona prikaz a rodic pocka na jeho dokoncenie */
     if(id == 0){
         if(execvp(argv[0],argv) == -1){
-            printf("execvp error\n");
+            printf("shell: %s: command not found\n",argv[0]);
             exit(EXIT_FAILURE);
         }
     }else{
@@ -219,5 +262,6 @@ void call_cmd(void){
             exit(EXIT_FAILURE);
         }
     }
+
 }
 
