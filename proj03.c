@@ -237,8 +237,6 @@ void call_cmd(void){
         return;
     }
 
-    /*char *cmds_argv[BUFFER_SIZE];
-    char *output_name;*/
 
     /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
     for(j = 0; j < i; j++){
@@ -261,14 +259,19 @@ void call_cmd(void){
                 /* presmerovanie stdout a do suboru */
                 dup2(desc,STDOUT_FILENO);
 
-                /* treba zobrazit chybove hlasky na stdout */
-                dup2(STDERR_FILENO,STDOUT_FILENO);
-
                 /* potrebujeme len prikaz pred > */
                 argv[j] = NULL;
 
                 /* zavola prikaz */
-                call_execvp(argv[0],argv);
+                if(execvp(argv[0],argv) == -1){
+                    /* chybu treba zobrazit */
+                    dup2(STDERR_FILENO,STDOUT_FILENO);
+                    printf("shell: %s: command not found\n",argv[0]);
+                    exit(EXIT_FAILURE);
+                }
+
+                /* zatvor subor */
+                close(desc);
 
                 /* ukonci child */
                 exit(EXIT_SUCCESS);
