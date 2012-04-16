@@ -16,6 +16,8 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 void sig_handler(int sig);
 void *read_input(void *p);
@@ -58,6 +60,7 @@ int main(int argc, char* argv[], char **envp){
 		return 1;
 	}
 
+    /* vycisti obrazovku a zobrazi shell */
     if(fork() == 0) {
 		execvp("clear", argv);
 		exit(1);
@@ -103,15 +106,20 @@ int main(int argc, char* argv[], char **envp){
         return 1;
     }
 
-    if ((res = pthread_join(thread_read,NULL)) != 0){
+    void *retval_read;
+
+    if ((res = pthread_join(thread_read,&retval_read)) != 0){
         printf("pthread_join() error %d\n",res);
         return 1;
     }
 
-    if ((res = pthread_join(thread_exec,NULL)) != 0){
+    void *retval_exec;
+
+    if ((res = pthread_join(thread_exec,&retval_exec)) != 0){
         printf("pthread_join() error %d\n",res);
         return 1;
     }
+
 
 	return 0;
 }
@@ -167,6 +175,7 @@ void *exec_cmd(void *p){
 
         /* vyprazdni buffer */
         memset(buffer, 0,BUFFER_SIZE);
+        /* posli signal vlaknu ze moze pokracovat v nacitani */
         pthread_cond_signal(&cond);
 
         pthread_mutex_unlock(&mutex);
@@ -187,12 +196,12 @@ void call_cmd(void){
     #endif
 
 
-    int i = 0;
-    char *argv[100];
-    char *ret_token;
-    char *rest = "";
+    int j,i = 0;
+    char *argv[BUFFER_SIZE];/* obshuje prikaz a vsetky jeho parametre */
+    char *ret_token;        /* naparsovany paramter */
+    char *rest = "";        /* treba inicializovat inak warning */
 
-    /* prechadza cely retazec a vytvara pole */
+    /* prechadza cely retazec a vytvara pole prikazu a jeho parametrov */
     while((ret_token = strtok_r(buffer, " ", &rest)) != NULL){
         /* odstrani znak noveho riadku */
         if(ret_token[strlen(ret_token) - 1] == '\n'){
@@ -206,7 +215,6 @@ void call_cmd(void){
     argv[i] = NULL;
 
     #ifdef DEBUG
-        int j;
         printf("\nDEBUG\n");
         for(j = 0; j < i; j++){
             printf("argv %d: %s\n",j,argv[j]);
@@ -223,15 +231,51 @@ void call_cmd(void){
         return;
     }
 
-    /* kontorla ci parameter neobsahuje presmerovanie vystupu > */
-
-
-
     /* TREBA IMPLENTOVAT NECO ROZUMNEJSIE  */
     if(strcmp(argv[0],"exit") == 0){
         program_exit = 1;
         return;
     }
+
+    /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
+    for(j = 0; j < i; j++){
+
+        /* presmerovanie vystupu */
+        if(strcmp(argv[j],">") == 0){
+
+            ssize_t w_size;
+
+
+            /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
+            int desc = open("test",O_CREAT|O_WRONLY,S_IWUSR|S_IRUSR|S_IRGRP|S_IROTH);
+
+
+            if(desc == -1){
+                perror("open file");
+                return;
+            }
+
+            char *text = "toto je text";
+            w_size = write(desc,text,sizeof(buffer));
+            if(w_size == -1){
+                perror("write");
+                close(desc);
+                return;
+            }
+
+            close(desc);
+            return;
+        }
+
+        /* presmerovanie vstupu */
+        if(strcmp(argv[j],"<") == 0){
+            printf("presmerovanie vstupu");
+            return;
+        }
+    }
+
+
+
 
     /*
      * vykonnanie samostatneho prikazu bez presmerovania vstupu/vystupu
