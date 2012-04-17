@@ -3,7 +3,7 @@
 #define _XOPEN_SOURCE_EXTENDED 1
 
 /*#define DEBUG*/
-#define BUFFER_SIZE 512
+#define BUFFER_SIZE 513
 #define SHELL_TEXT "dsh"
 #define SHELL_COLOR 32 /* zelena */
 #undef getchar/*treba zistit ci je getchar threadsafe*/
@@ -46,8 +46,7 @@ int main(int argc, char* argv[], char **envp){
     pthread_attr_t attr;
     int res;
 
-
-    if((buffer = (char *)malloc(sizeof(char) * BUFFER_SIZE)) == NULL){
+    if((buffer = (char *)calloc(BUFFER_SIZE,sizeof(char))) == NULL){
         printf("buffer mallock error\n");
         return 1;
     }
@@ -57,9 +56,10 @@ int main(int argc, char* argv[], char **envp){
     sigemptyset(&sigact.sa_mask);
 
     if(sigaction(SIGINT,&sigact,NULL)){
-		printf("sigaction() error\n");
+		printf("sigaction()");
 		return 1;
 	}
+
 
     /* vycisti obrazovku a zobrazi shell */
     if(fork() == 0) {
@@ -130,6 +130,7 @@ void *read_input(void *p){
     int rlen;
 
     while(!program_exit){
+
         pthread_mutex_lock(&mutex);
 
         /* ak nie je buffer prazdny, tak cakaj */
@@ -141,9 +142,11 @@ void *read_input(void *p){
         fflush(stdout);
 
         /* nacitaj vstup a ak je prilis dlhy tak chyba */
-        if((rlen = read(STDIN_FILENO,buffer,BUFFER_SIZE)) == -1){
+        if((rlen = read(STDIN_FILENO,buffer,BUFFER_SIZE-1)) == -1){
             exit(EXIT_FAILURE);
         }
+
+        buffer[rlen] = 0;
 
         /* ak je spravne velkost vstupu moze sa spracovat */
         if(rlen < BUFFER_SIZE){
@@ -152,7 +155,9 @@ void *read_input(void *p){
             printf("Error: Input is too long %d \n",rlen);
             /* vyprazdni stdin a buffer */
             while (getchar() != '\n');
-            memset(buffer, 0, BUFFER_SIZE);
+
+            buffer = (char *)malloc(sizeof(char)*BUFFER_SIZE);
+            /*memset(buffer,0,BUFFER_SIZE);*/
         }
 
         pthread_mutex_unlock(&mutex);
@@ -175,13 +180,13 @@ void *exec_cmd(void *p){
         call_cmd();
 
         /* vyprazdni buffer */
-        memset(buffer, 0,BUFFER_SIZE);
+        buffer = (char *)malloc(sizeof(char)*BUFFER_SIZE);
+
+
         /* posli signal vlaknu ze moze pokracovat v nacitani */
         pthread_cond_signal(&cond);
 
         pthread_mutex_unlock(&mutex);
-
-
     }
 
     return (void *) 0;
@@ -190,12 +195,16 @@ void *exec_cmd(void *p){
 void call_cmd(void){
 
     /* spracovavat prazdne prikazy nema vyznam */
-    if(strlen(buffer) < 2) return;
+    /*if(strlen(buffer) < 2) return;*/
+    if(buffer[0] == '\n') {
+        buffer = (char *)calloc(BUFFER_SIZE,sizeof(char));
+        return;
+    }
+
 
     #ifdef DEBUG
         printf("prikaz:%s",buffer);
     #endif
-
 
     int j,i = 0;
     char *argv[BUFFER_SIZE];/* obshuje prikaz a vsetky jeho parametre */
@@ -206,11 +215,12 @@ void call_cmd(void){
     while((ret_token = strtok_r(buffer, " ", &rest)) != NULL){
         /* odstrani znak noveho riadku */
         if(ret_token[strlen(ret_token) - 1] == '\n'){
-            ret_token[strlen(ret_token) - 1] = 0;
+            ret_token[strlen(ret_token) - 1] = '\0';
         }
         argv[i++] = ret_token;
         buffer = rest;
     }
+
 
     /* na poslednu poziciu NULL */
     argv[i] = NULL;
@@ -257,7 +267,7 @@ void call_cmd(void){
                     return;
                 }
 
-                /* presmerovanie stdout a do suboru */
+                /* presmerovanie stdout do suboru */
                 dup2(desc,STDOUT_FILENO);
 
                 /* potrebujeme len prikaz pred > */
@@ -285,7 +295,7 @@ void call_cmd(void){
             }else{/* chyba */
 
                 perror("fork");
-
+                exit(EXIT_FAILURE);
             }
 
             return;
@@ -298,7 +308,7 @@ void call_cmd(void){
 
             if((pid = fork()) == 0){
 
-                /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
+                /* treba otvorit subor a premesmerovovat ho na stdin */
                 int desc = open(argv[j+1],O_RDONLY);
 
                 if(desc == -1){
@@ -370,5 +380,6 @@ void call_execvp(char *cmd, char *argv[]){
         }
     }
 
+    return;
 }
 
