@@ -33,7 +33,8 @@ typedef struct parsed_cmd_s{
     char *argv[BUFFER_SIZE];      /* naparsovane argumenty */
     int argv_length; /* pocet argumentov */
     int background; /* spustit na pozadi */
-    int redirect; /* typ presmerovanie */
+    int redirect; /* typ presmerovania */
+    int redirect_pos;/* pozicia znaku presmerovania */
     int amp_pos; /* pozicia ampers. presmerovania & inak -1 */
 } parsed_cmd_t;
 
@@ -44,13 +45,11 @@ void *exec_cmd(void *p);
 void call_cmd(void);
 int parse_buffer(char *buffer, parsed_cmd_t *flags);
 void call_execvp(parsed_cmd_t flags);
-void redirect_input(char **argv, int argv_length);
-void redirect_output(char **argv, int argv_length);
+void redirect_input(parsed_cmd_t flags);
+void redirect_output(parsed_cmd_t flags);
 void run_background(char **argv);
 int get_char_position(char *text, char search_char);
 void debug_parsed_cmd(parsed_cmd_t flags);
-
-
 
 
 void sig_handler(int sig){
@@ -255,20 +254,14 @@ void call_cmd(void){
     /* naparsuje buffer */
     parse_buffer(buffer,&flags);
 
-    #ifdef DEBUG
-        debug_parsed_cmd(flags);
-    #endif
-
 
     /* Interne prikazy */
-
 
     /* ak je prikaz cd */
     if(strcmp(flags.argv[0],"cd") == 0){
         if(chdir(flags.argv[1]) != 0){
             perror("dsh: cd");
         }
-
         return;
     }
 
@@ -316,10 +309,10 @@ int parse_buffer(char *buffer, parsed_cmd_t *flags){
         buffer = rest;
     }
 
+    flags->redirect_pos = -1;
     flags->redirect = 0;    /* default hodnota */
     flags->argv[i] = NULL;  /* na poslednu poziciu NULL */
     flags->argv_length = i; /* nastav pocet argumentov */
-
 
 
     /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
@@ -328,17 +321,19 @@ int parse_buffer(char *buffer, parsed_cmd_t *flags){
         /* presmerovanie vystupu */
         if(strcmp(flags->argv[j],">") == 0){
             flags->redirect = REDIRECT_OUTPUT;
+            flags->redirect_pos = j;
             return 1;
         }
 
         /* presmerovanie vystupu */
         if(strcmp(flags->argv[j],"<") == 0){
             flags->redirect = REDIRECT_INPUT;
+            flags->redirect_pos = j;
             return 1;
         }
     }
 
-    return -1;
+    return 1;
 }
 
 void debug_parsed_cmd(parsed_cmd_t flags){
@@ -356,6 +351,7 @@ void debug_parsed_cmd(parsed_cmd_t flags){
     printf("argv_length:%d\n",flags.argv_length);
     printf("background:%d\n",flags.background);
     printf("redirect:%d\n",flags.redirect);
+    printf("redirect pos: %d\n",flags.redirect_pos);
 
     printf("--------------------------------\n");
 
@@ -367,8 +363,6 @@ void call_execvp(parsed_cmd_t flags){
     pid_t id;
     int status;
 
-
-
     if((id = fork()) == -1){
         printf("fork error\n");
         exit(EXIT_FAILURE);
@@ -376,9 +370,16 @@ void call_execvp(parsed_cmd_t flags){
 
     /* child vykona prikaz a rodic pocka na jeho dokoncenie */
     if(id == 0){
-        if(execvp(flags.argv[0],flags.argv) == -1){
-            printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
-            exit(EXIT_FAILURE);
+        if(flags.redirect == REDIRECT_INPUT){
+            redirect_input(flags);
+        }else if(flags.redirect == REDIRECT_OUTPUT){
+            redirect_output(flags);
+        }
+        else {/*vsetky ostatne prikazy */
+            if(execvp(flags.argv[0],flags.argv) == -1){
+                printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
+                exit(EXIT_FAILURE);
+            }
         }
     }else{
 
@@ -433,121 +434,66 @@ void call_execvp(parsed_cmd_t flags){
     return;
 }
 
-void redirect_output(char **argv, int argv_length){
+void redirect_output(parsed_cmd_t flags){
 
-    int j;
+     #ifdef DEBUG
+        debug_parsed_cmd(flags);
+    #endif
 
-    /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
-    for(j = 0; j < argv_length; j++){
+    /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
+    int desc = open(flags.argv[flags.redirect_pos+1],O_CREAT|O_WRONLY,S_IWUSR|S_IRUSR|S_IRGRP|S_IROTH);
 
-        /* presmerovanie vystupu */
-        if(strcmp(argv[j],">") == 0){
-
-            pid_t pid;
-
-            if((pid = fork()) == 0){
-
-                /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
-                int desc = open(argv[j+1],O_CREAT|O_WRONLY,S_IWUSR|S_IRUSR|S_IRGRP|S_IROTH);
-
-                if(desc == -1){
-                    perror("open file");
-                    return;
-                }
-
-                /* presmerovanie stdout do suboru */
-                dup2(desc,STDOUT_FILENO);
-
-                /* potrebujeme len prikaz pred > */
-                argv[j] = NULL;
-
-                /* zavola prikaz */
-                if(execvp(argv[0],argv) == -1){
-                    /* chybu treba zobrazit */
-                    dup2(STDERR_FILENO,STDOUT_FILENO);
-                    printf("%s: %s: command not found\n",SHELL_TEXT,argv[0]);
-                    exit(EXIT_FAILURE);
-                }
-
-                /* zatvor subor */
-                close(desc);
-
-                /* ukonci child */
-                exit(EXIT_SUCCESS);
-
-            }else if(pid > 0){/* parent */
-
-                /* pockaj na dokoncenie child */
-                wait(NULL);
-
-            }else{/* chyba */
-
-                perror("fork");
-                exit(EXIT_FAILURE);
-            }
-
-            /* pocita len s jednym presmerovanim */
-            return;
-        }
+    if(desc == -1){
+        perror("open file");
+        return;
     }
+
+    /* presmerovanie stdout do suboru */
+    dup2(desc,STDOUT_FILENO);
+
+    /* potrebujeme len prikaz pred > */
+    flags.argv[flags.redirect_pos] = NULL;
+
+    /* zavola prikaz */
+    if(execvp(flags.argv[0],flags.argv) == -1){
+        /* chybu treba zobrazit */
+        dup2(STDERR_FILENO,STDOUT_FILENO);
+        printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    /* zatvor subor */
+    close(desc);
 
     return;
+
 }
 
-void redirect_input(char **argv,int argv_length){
+void redirect_input(parsed_cmd_t flags){
 
-    int j;
+    /* treba otvorit subor a premesmerovovat ho na stdin */
+    int desc = open(flags.argv[flags.redirect_pos+1],O_RDONLY);
 
-    /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
-    for(j = 0; j < argv_length; j++){
-
-        /* presmerovanie vstupu */
-        if(strcmp(argv[j],"<") == 0){
-
-            pid_t pid;
-
-            if((pid = fork()) == 0){
-
-                /* treba otvorit subor a premesmerovovat ho na stdin */
-                int desc = open(argv[j+1],O_RDONLY);
-
-                if(desc == -1){
-                    perror(SHELL_TEXT);
-                    exit(EXIT_FAILURE);
-                }
-
-                /* presmerovanie na vstup */
-                dup2(desc,STDIN_FILENO);
-
-                /* potrebujeme len prikaz pred > */
-                argv[j] = NULL;
-
-                /* zavola prikaz */
-                if(execvp(argv[0],argv) == -1){
-                    printf("%s: %s: command not found\n",SHELL_TEXT,argv[0]);
-                    exit(EXIT_FAILURE);
-                }
-
-                /* zatvor subor */
-                close(desc);
-
-                /* ukonci child */
-                exit(EXIT_SUCCESS);
-
-            }else if(pid > 0){/* parent */
-
-                /* pockaj na dokoncenie child */
-                wait(NULL);
-
-            }else{/* chyba */
-
-                perror("fork");
-
-            }
-
-            return;
-        }
+    if(desc == -1){
+        perror(SHELL_TEXT);
+        exit(EXIT_FAILURE);
     }
+
+    /* presmerovanie na vstup */
+    dup2(desc,STDIN_FILENO);
+
+    /* potrebujeme len prikaz pred > */
+    flags.argv[flags.redirect_pos] = NULL;
+
+    /* zavola prikaz */
+    if(execvp(flags.argv[0],flags.argv) == -1){
+        printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    /* zatvor subor */
+    close(desc);
+
 
     return;
 }
