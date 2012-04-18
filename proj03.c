@@ -38,6 +38,7 @@ typedef struct parsed_cmd_s{
     int redirect;                 /* typ presmerovania */
     int redirect_pos;             /* pozicia znaku presmerovania */
     int amp_pos;                  /* pozicia ampers. presmerovania & inak -1 */
+    int stdout;
 } parsed_cmd_t;
 
 
@@ -52,26 +53,26 @@ void redirect_output(parsed_cmd_t flags);
 void run_background(parsed_cmd_t flags);
 int get_char_position(char *text, char search_char);
 void debug_parsed_cmd(parsed_cmd_t flags);
-
+void my_exect(parsed_cmd_t flags);
 
 void sig_handler(int sig){
 
     /* ukonci beziaci proces na popradi */
     if(sig == SIGCHLD){
-
         if(is_bgr_proc){
             #ifdef DEBUG
-                printf("\n\background process \n\n");
+                printf("\n\nbackground process \n\n");
             #endif
-            pid_t pid = wait(NULL);
-            printf("[1] %d\n",pid);/* */
+            is_bgr_proc = 0;
             fflush(stdout);
         }else{
+             #ifdef DEBUG
+                printf("\n\nforground process \n\n");
+            #endif
             /* ak nie je background process, tak pockaj */
             wait(NULL);
         }
     }
-
 }
 
 int main(int argc, char* argv[], char **envp){
@@ -155,7 +156,6 @@ int main(int argc, char* argv[], char **envp){
         return 1;
     }
 
-
 	return 0;
 }
 
@@ -163,13 +163,14 @@ void *read_input(void *p){
 
     int rlen;
 
-    while(!program_exit){
+    while(1){
 
         pthread_mutex_lock(&mutex);
 
         /* ak nie je buffer prazdny, tak cakaj */
         while(strlen(buffer) > 0)
                 pthread_cond_wait(&cond,&mutex);
+
 
         /* zobrazi shell text */
         printf("\033[%dm\033[1m%s>\033[m\033[m ",SHELL_COLOR,SHELL_TEXT);
@@ -180,6 +181,10 @@ void *read_input(void *p){
             exit(EXIT_FAILURE);
         }
 
+        /* ukoncenie ctrl+d */
+        if(buffer[0] == 0){
+            exit(EXIT_SUCCESS);
+        }
 
         buffer[rlen] = 0;
 
@@ -208,7 +213,7 @@ void *read_input(void *p){
 
 void *exec_cmd(void *p){
 
-    while(!program_exit){
+    while(1){
 
         /* treba pockat na signal od input vlakna */
         pthread_mutex_lock(&mutex);
@@ -225,7 +230,9 @@ void *exec_cmd(void *p){
          * buffer[0] = 0; - vyhadzuje segfault
          * TODO: treba vymysliet nieco rozumensie
          */
+
         buffer = (char *)malloc(sizeof(char)*BUFFER_SIZE);
+
 
 
         /* posli signal vlaknu ze moze pokracovat v nacitani */
@@ -275,10 +282,9 @@ void call_cmd(void){
         return;
     }
 
-    /* TREBA IMPLENTOVAT NECO ROZUMNEJSIE  */
+
     if(strcmp(flags.argv[0],"exit") == 0){
-        program_exit = 1;
-        return;
+        exit(EXIT_SUCCESS);
     }
 
 
@@ -323,7 +329,7 @@ int parse_buffer(char *buffer, parsed_cmd_t *flags){
     flags->redirect = 0;    /* default hodnota */
     flags->argv[i] = NULL;  /* na poslednu poziciu NULL */
     flags->argv_length = i; /* nastav pocet argumentov */
-
+    flags->stdout = dup(STDOUT_FILENO);
 
     /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
     for(j = 0; j < flags->argv_length; j++){
@@ -368,13 +374,18 @@ void debug_parsed_cmd(parsed_cmd_t flags){
 
 }
 
+void my_exect(parsed_cmd_t flags){
+
+}
+
 void call_execvp(parsed_cmd_t flags){
 
     pid_t id;
-    int status;
     struct sigaction sigchild;
+    is_bgr_proc = 0;    /* default sa spusta vzdy na popredi */
 
-    /* handler na osetrenie ukoncenie procesu */
+
+    /* handler na osetrenie ukoncenia procesu */
     sigchild.sa_flags = 0;
     sigchild.sa_handler = sig_handler;
     sigemptyset(&sigchild.sa_mask);
@@ -384,6 +395,9 @@ void call_execvp(parsed_cmd_t flags){
         exit(EXIT_FAILURE);
     }
 
+    if(flags.background){
+        is_bgr_proc = 1;
+    }
 
     /* vykonanie prikazov */
     if((id = fork()) == -1){
@@ -399,71 +413,31 @@ void call_execvp(parsed_cmd_t flags){
             redirect_output(flags);
         }
         else {/*vsetky ostatne prikazy */
-            if(execvp(flags.argv[0],flags.argv) == -1){
-                printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
-                exit(EXIT_FAILURE);
-            }
+
+                /* ak sa spusta na pozadi vytvor novy proces */
+                if(flags.background){
+                    run_background(flags);
+                }else{/* inak normalne spusti na popredi */
+                    if(execvp(flags.argv[0],flags.argv) == -1){
+                        printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
+                        exit(EXIT_FAILURE);
+                    }
+                }
+
         }
     }else{/* parent */
-        /* ak je na pozadi tak zobraz vystup az ked skonci */
-        if(flags.background){
-            run_background(flags);
-        }else{
-            /* zastav parent a pockaj na obsluzenie */
+        /* cakaj len ak je proces v popredi */
+        if(!flags.background){
             pause();
+        }else{
+
         }
-        /*
-        else {
-            /* pockaj na proces v popredi a
-            if(waitpid(id,&status,0) == -1){
-                printf("waitpid error\n");
-                exit(EXIT_FAILURE);
-            }
-        }
-        */
     }
-
-/*
-    if(amp_pos != -1){
-
-        pid_t pid;
-        struct sigaction sigchild;
-        sigchild.sa_flags = 0;
-        sigchild.sa_handler = sig_handler;
-        sigemptyset(&sigchild.sa_mask);
-
-        if(sigaction(SIGCHLD,&sigchild,NULL)){
-            printf("sigaction()");
-            exit(EXIT_FAILURE);
-        }
-
-        if((pid = fork()) == -1){
-            perror("fork");
-            exit(EXIT_FAILURE);
-        }
-
-        if(pid == 0){ /* child
-
-            buffer[amp_pos] = '\0';
-
-            /* vykona cinnost na pozadi bez vystuput
-            int null = open(DEV_NULL,O_WRONLY);
-            dup2(null,STDOUT_FILENO);
-
-            call_cmd();
-
-            exit(EXIT_SUCCESS);
-        }
-
-
-    }
-*/
 
     return;
 }
 
 void redirect_output(parsed_cmd_t flags){
-
 
     /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
     int desc = open(flags.argv[flags.redirect_pos+1],O_CREAT|O_WRONLY,S_IWUSR|S_IRUSR|S_IRGRP|S_IROTH);
@@ -479,16 +453,21 @@ void redirect_output(parsed_cmd_t flags){
     /* potrebujeme len prikaz pred > */
     flags.argv[flags.redirect_pos] = NULL;
 
-    /* zavola prikaz */
-    if(execvp(flags.argv[0],flags.argv) == -1){
-        /* chybu treba zobrazit */
-        dup2(STDERR_FILENO,STDOUT_FILENO);
-        printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
-        exit(EXIT_FAILURE);
+    if(flags.background){
+        run_background(flags);
+    }else{
+        /* zavola prikaz */
+        if(execvp(flags.argv[0],flags.argv) == -1){
+            /* chybu treba zobrazit */
+            dup2(STDERR_FILENO,STDOUT_FILENO);
+            printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
+            exit(EXIT_FAILURE);
+        }
     }
 
     /* zatvor subor */
     close(desc);
+
 
     return;
 
@@ -510,12 +489,15 @@ void redirect_input(parsed_cmd_t flags){
     /* potrebujeme len prikaz pred > */
     flags.argv[flags.redirect_pos] = NULL;
 
-    /* zavola prikaz */
-    if(execvp(flags.argv[0],flags.argv) == -1){
-        printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
-        exit(EXIT_FAILURE);
+    if(flags.background){
+        run_background(flags);
+    }else{
+        /* zavola prikaz */
+        if(execvp(flags.argv[0],flags.argv) == -1){
+            printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
+            exit(EXIT_FAILURE);
+        }
     }
-
     /* zatvor subor */
     close(desc);
 
@@ -525,9 +507,76 @@ void redirect_input(parsed_cmd_t flags){
 
 void run_background(parsed_cmd_t flags){
 
-    printf("musi byt na pozdi");
+
+    int pipefd[2];
+
+    if(pipe(pipefd) == -1) {
+        perror("pipe");
+        exit(EXIT_FAILURE);
+    }
+
+    pid_t grand_child = fork();
+
+    if(grand_child == -1){
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+
+    if(grand_child == 0){ /*child*/
+        close(pipefd[0]);
+
+        /* ak sa nepresmerovanva do suboru, tak nevypisuj*/
+        if(flags.redirect == NO_REDIRECTION){
+            /* ak je bacground tak nevypisuj */
+            dup2(pipefd[1], STDOUT_FILENO);
+            dup2(pipefd[1], STDERR_FILENO);
+        }
+
+        /* nech nepyta vstup */
+        int null = open(DEV_NULL,O_RDWR);
+        dup2(null,STDIN_FILENO);
+
+        if(execvp(flags.argv[0],flags.argv) == -1){
+            printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
+            exit(EXIT_FAILURE);
+        }
 
 
+    }else { /* parent */
+
+        pause();
+        close(pipefd[1]);
+
+        /* ak sa premerovava tak treba vypisat na stdout nie do suboru */
+        if(flags.redirect > NO_REDIRECTION){
+            dup2(flags.stdout,STDOUT_FILENO);
+        }
+
+
+         /* zobrazi hlasku o ukonceni */
+         printf("\nDone: pid=[%d]\n",grand_child);
+
+        /* vypis zachyteny stdout */
+        char buf;
+        while(read(pipefd[0], &buf, 1) > 0){
+            if(write(STDOUT_FILENO, &buf, 1) == -1){
+                perror("write");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        /* treba vpisat aj prompt nech to trocha vyzera */
+        char *prompt = "\033[32m\033[1mdsh>\033[m\033[m ";
+        if(write(STDOUT_FILENO,prompt,strlen(prompt)) == -1){
+            perror("write");
+            exit(EXIT_FAILURE);
+        }
+
+        close(pipefd[0]);
+    }
+
+
+    return;
 }
 
 int get_char_position(char *text, char search_char){
