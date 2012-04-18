@@ -2,11 +2,14 @@
 #define _XOPEN_SOURCE
 #define _XOPEN_SOURCE_EXTENDED 1
 
-/*#define DEBUG*/
+#define DEBUG
 #define BUFFER_SIZE 513
 #define SHELL_TEXT "dsh"
 #define SHELL_COLOR 32 /* zelena */
-#undef getchar/*treba zistit ci je getchar threadsafe*/
+#define DEV_NULL "/dev/null"
+#define NO_REDIRECTION 0
+#define REDIRECT_OUTPUT 1
+#define REDIRECT_INPUT 2
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,24 +23,49 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-void sig_handler(int sig);
-void *read_input(void *p);
-void *exec_cmd(void *p);
-void call_cmd(void);
-void call_execvp(char *cmd, char *argv[]);
-
 char *buffer;
 volatile sig_atomic_t program_exit = 0; /* ukoncenie programu */
 pthread_t thread_read,thread_exec;
 pthread_cond_t cond;
 pthread_mutex_t mutex;
 
+typedef struct parsed_cmd_s{
+    char *argv[BUFFER_SIZE];      /* naparsovane argumenty */
+    int argv_length; /* pocet argumentov */
+    int background; /* spustit na pozadi */
+    int redirect; /* typ presmerovanie */
+    int amp_pos; /* pozicia ampers. presmerovania & inak -1 */
+} parsed_cmd_t;
+
+
+void sig_handler(int sig);
+void *read_input(void *p);
+void *exec_cmd(void *p);
+void call_cmd(void);
+int parse_buffer(char *buffer, parsed_cmd_t *flags);
+void call_execvp(parsed_cmd_t flags);
+void redirect_input(char **argv, int argv_length);
+void redirect_output(char **argv, int argv_length);
+void run_background(char **argv);
+int get_char_position(char *text, char search_char);
+void debug_parsed_cmd(parsed_cmd_t flags);
+
+
+
+
 void sig_handler(int sig){
     #ifdef DEBUG
         printf("\n\nsingal\n\n");
     #endif
-    /* DOCASNE - IMPLENENTOVAT UKONCENIE PROCESU NA POZADI */
-    program_exit = 1;
+
+    /* ukonci beziaci proces na popradi */
+    if(sig == SIGCHLD){
+        pid_t pid = wait(NULL);
+        printf("[1] %d\n",pid);/* */
+        signal(SIGCHLD,sig_handler);
+        fflush(stdout);
+    }
+
 }
 
 int main(int argc, char* argv[], char **envp){
@@ -142,9 +170,10 @@ void *read_input(void *p){
         fflush(stdout);
 
         /* nacitaj vstup a ak je prilis dlhy tak chyba */
-        if((rlen = read(STDIN_FILENO,buffer,BUFFER_SIZE-1)) == -1){
+        if((rlen = read(STDIN_FILENO,buffer,BUFFER_SIZE)) == -1){
             exit(EXIT_FAILURE);
         }
+
 
         buffer[rlen] = 0;
 
@@ -153,8 +182,13 @@ void *read_input(void *p){
             pthread_cond_signal(&cond);
         }else{
             printf("Error: Input is too long %d \n",rlen);
+
             /* vyprazdni stdin a buffer */
-            while (getchar() != '\n');
+            char a;
+            while(read(STDIN_FILENO,&a,1) != -1){
+                if(a == '\n') break;
+            }
+
 
             buffer = (char *)malloc(sizeof(char)*BUFFER_SIZE);
             /*memset(buffer,0,BUFFER_SIZE);*/
@@ -173,13 +207,18 @@ void *exec_cmd(void *p){
         /* treba pockat na signal od input vlakna */
         pthread_mutex_lock(&mutex);
 
+
         /* ak je prazdny buffer tak cakaj */
         while(strlen(buffer) == 0)
             pthread_cond_wait(&cond,&mutex);
 
+
         call_cmd();
 
-        /* vyprazdni buffer */
+        /* vyprazdni buffer
+         * buffer[0] = 0; - vyhadzuje segfault
+         * TODO: treba vymysliet nieco rozumensie
+         */
         buffer = (char *)malloc(sizeof(char)*BUFFER_SIZE);
 
 
@@ -192,9 +231,13 @@ void *exec_cmd(void *p){
     return (void *) 0;
 }
 
+
 void call_cmd(void){
 
-    /* spracovavat prazdne prikazy nema vyznam */
+
+    /* parsovanie prikazu */
+
+    /* prazdne prikazy nespracovavaj */
     /*if(strlen(buffer) < 2) return;*/
     if(buffer[0] == '\n') {
         buffer = (char *)calloc(BUFFER_SIZE,sizeof(char));
@@ -203,39 +246,26 @@ void call_cmd(void){
 
 
     #ifdef DEBUG
-        printf("prikaz:%s",buffer);
+        printf("buffer:%s",buffer);
     #endif
 
-    int j,i = 0;
-    char *argv[BUFFER_SIZE];/* obshuje prikaz a vsetky jeho parametre */
-    char *ret_token;        /* naparsovany paramter */
-    char *rest = "";        /* treba inicializovat inak warning */
 
-    /* prechadza cely retazec a vytvara pole prikazu a jeho parametrov */
-    while((ret_token = strtok_r(buffer, " ", &rest)) != NULL){
-        /* odstrani znak noveho riadku */
-        if(ret_token[strlen(ret_token) - 1] == '\n'){
-            ret_token[strlen(ret_token) - 1] = '\0';
-        }
-        argv[i++] = ret_token;
-        buffer = rest;
-    }
+    parsed_cmd_t flags;
 
-
-    /* na poslednu poziciu NULL */
-    argv[i] = NULL;
+    /* naparsuje buffer */
+    parse_buffer(buffer,&flags);
 
     #ifdef DEBUG
-        printf("\nDEBUG\n");
-        for(j = 0; j < i; j++){
-            printf("argv %d: %s\n",j,argv[j]);
-        }
-        printf("\n");
+        debug_parsed_cmd(flags);
     #endif
 
+
+    /* Interne prikazy */
+
+
     /* ak je prikaz cd */
-    if(strcmp(argv[0],"cd") == 0){
-        if(chdir(argv[1]) != 0){
+    if(strcmp(flags.argv[0],"cd") == 0){
+        if(chdir(flags.argv[1]) != 0){
             perror("dsh: cd");
         }
 
@@ -243,14 +273,172 @@ void call_cmd(void){
     }
 
     /* TREBA IMPLENTOVAT NECO ROZUMNEJSIE  */
-    if(strcmp(argv[0],"exit") == 0){
+    if(strcmp(flags.argv[0],"exit") == 0){
         program_exit = 1;
         return;
     }
 
 
+    /* ostatne prikazy */
+    call_execvp(flags);
+}
+
+
+/** Naparsuje buffer a hodnoty zapise do struktury */
+int parse_buffer(char *buffer, parsed_cmd_t *flags){
+
+    /* kontorla inicializacie */
+    if(flags == NULL){
+        printf("uninicialized struct\n");
+        return -1;
+    }
+
+    int j,i = 0;
+    char *ret_token;        /* naparsovany parameter */
+    char *rest = (char *)malloc(sizeof(char)*BUFFER_SIZE);        /* treba inicializovat inak warning */
+
+    flags->background = 0; /* default hodnota - spusti v popredi */
+    flags->amp_pos = get_char_position(buffer,'&');/* zisti poziciu ampers. */
+    if(flags->amp_pos != -1) {
+        buffer[flags->amp_pos] = 0; /* odstran znak & */
+        flags->background = 1;      /* nastav priznak spustenia v pozadi */
+    }
+
+
+    /* prechadza cely retazec a vytvara pole prikazu a jeho parametrov */
+    while((ret_token = strtok_r(buffer, " ", &rest)) != NULL){
+        /* odstrani znak noveho riadku */
+        if(ret_token[strlen(ret_token) - 1] == '\n'){
+            ret_token[strlen(ret_token) - 1] = '\0';
+        }
+
+        flags->argv[i++] = ret_token;
+        buffer = rest;
+    }
+
+    flags->redirect = 0;    /* default hodnota */
+    flags->argv[i] = NULL;  /* na poslednu poziciu NULL */
+    flags->argv_length = i; /* nastav pocet argumentov */
+
+
+
     /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
-    for(j = 0; j < i; j++){
+    for(j = 0; j < flags->argv_length; j++){
+
+        /* presmerovanie vystupu */
+        if(strcmp(flags->argv[j],">") == 0){
+            flags->redirect = REDIRECT_OUTPUT;
+            return 1;
+        }
+
+        /* presmerovanie vystupu */
+        if(strcmp(flags->argv[j],"<") == 0){
+            flags->redirect = REDIRECT_INPUT;
+            return 1;
+        }
+    }
+
+    return -1;
+}
+
+void debug_parsed_cmd(parsed_cmd_t flags){
+
+    int j;
+
+    printf("--------------DEBUG-------------\n");
+
+
+    for(j = 0; j < flags.argv_length; j++){
+        printf("argv %d: %s\n",j,flags.argv[j]);
+    }
+    printf("\n");
+    printf("amp_pos:%d\n",flags.amp_pos);
+    printf("argv_length:%d\n",flags.argv_length);
+    printf("background:%d\n",flags.background);
+    printf("redirect:%d\n",flags.redirect);
+
+    printf("--------------------------------\n");
+
+
+}
+
+void call_execvp(parsed_cmd_t flags){
+
+    pid_t id;
+    int status;
+
+
+
+    if((id = fork()) == -1){
+        printf("fork error\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* child vykona prikaz a rodic pocka na jeho dokoncenie */
+    if(id == 0){
+        if(execvp(flags.argv[0],flags.argv) == -1){
+            printf("%s: %s: command not found\n",SHELL_TEXT,flags.argv[0]);
+            exit(EXIT_FAILURE);
+        }
+    }else{
+
+        if(flags.background){
+            /* treba presmerovat vystup a vypisat az ked sa dokonci */
+            run_background(flags.argv);
+        }else {
+            /* pockaj na proces v popredi a */
+            if(waitpid(id,&status,0) == -1){
+                printf("waitpid error\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+
+/*
+    if(amp_pos != -1){
+
+        pid_t pid;
+        struct sigaction sigchild;
+        sigchild.sa_flags = 0;
+        sigchild.sa_handler = sig_handler;
+        sigemptyset(&sigchild.sa_mask);
+
+        if(sigaction(SIGCHLD,&sigchild,NULL)){
+            printf("sigaction()");
+            exit(EXIT_FAILURE);
+        }
+
+        if((pid = fork()) == -1){
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+
+        if(pid == 0){ /* child
+
+            buffer[amp_pos] = '\0';
+
+            /* vykona cinnost na pozadi bez vystuput
+            int null = open(DEV_NULL,O_WRONLY);
+            dup2(null,STDOUT_FILENO);
+
+            call_cmd();
+
+            exit(EXIT_SUCCESS);
+        }
+
+
+    }
+*/
+
+    return;
+}
+
+void redirect_output(char **argv, int argv_length){
+
+    int j;
+
+    /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
+    for(j = 0; j < argv_length; j++){
 
         /* presmerovanie vystupu */
         if(strcmp(argv[j],">") == 0){
@@ -298,8 +486,20 @@ void call_cmd(void){
                 exit(EXIT_FAILURE);
             }
 
+            /* pocita len s jednym presmerovanim */
             return;
         }
+    }
+
+    return;
+}
+
+void redirect_input(char **argv,int argv_length){
+
+    int j;
+
+    /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
+    for(j = 0; j < argv_length; j++){
 
         /* presmerovanie vstupu */
         if(strcmp(argv[j],"<") == 0){
@@ -349,37 +549,25 @@ void call_cmd(void){
         }
     }
 
-
-    /*
-     * vykonnanie samostatneho prikazu bez presmerovania vstupu/vystupu
-     * alebo spustenia na pozadi
-     */
-    call_execvp(argv[0],argv);
-}
-
-void call_execvp(char *cmd, char *argv[]){
-
-    pid_t id;
-    int status;
-
-    if((id = fork()) == -1){
-        printf("fork error\n");
-        exit(EXIT_FAILURE);
-    }
-
-    /* child vykona prikaz a rodic pocka na jeho dokoncenie */
-    if(id == 0){
-        if(execvp(argv[0],argv) == -1){
-            printf("%s: %s: command not found\n",SHELL_TEXT,argv[0]);
-            exit(EXIT_FAILURE);
-        }
-    }else{
-        if(waitpid(id,&status,0) == -1){
-            printf("waitpid error\n");
-            exit(EXIT_FAILURE);
-        }
-    }
-
     return;
 }
 
+void run_background(char **argv){
+
+
+
+}
+
+int get_char_position(char *text, char search_char){
+
+  char *pch;
+  int pos;
+
+  if((pch = strrchr(text,search_char)) == NULL){
+        return -1;
+  }
+
+  pos = pch - text;
+
+  return pos;
+}
