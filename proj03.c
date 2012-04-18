@@ -2,7 +2,7 @@
 #define _XOPEN_SOURCE
 #define _XOPEN_SOURCE_EXTENDED 1
 
-#define DEBUG
+/*#define DEBUG*/
 #define BUFFER_SIZE 513
 #define SHELL_TEXT "dsh"
 #define SHELL_COLOR 32 /* zelena */
@@ -25,17 +25,19 @@
 
 char *buffer;
 volatile sig_atomic_t program_exit = 0; /* ukoncenie programu */
+volatile sig_atomic_t is_bgr_proc = 0;  /* urcuje ci ide o background process */
+pid_t child;                            /* proces na pozadi */
 pthread_t thread_read,thread_exec;
 pthread_cond_t cond;
 pthread_mutex_t mutex;
 
 typedef struct parsed_cmd_s{
     char *argv[BUFFER_SIZE];      /* naparsovane argumenty */
-    int argv_length; /* pocet argumentov */
-    int background; /* spustit na pozadi */
-    int redirect; /* typ presmerovania */
-    int redirect_pos;/* pozicia znaku presmerovania */
-    int amp_pos; /* pozicia ampers. presmerovania & inak -1 */
+    int argv_length;              /* pocet argumentov */
+    int background;               /* spustit na pozadi */
+    int redirect;                 /* typ presmerovania */
+    int redirect_pos;             /* pozicia znaku presmerovania */
+    int amp_pos;                  /* pozicia ampers. presmerovania & inak -1 */
 } parsed_cmd_t;
 
 
@@ -47,22 +49,27 @@ int parse_buffer(char *buffer, parsed_cmd_t *flags);
 void call_execvp(parsed_cmd_t flags);
 void redirect_input(parsed_cmd_t flags);
 void redirect_output(parsed_cmd_t flags);
-void run_background(char **argv);
+void run_background(parsed_cmd_t flags);
 int get_char_position(char *text, char search_char);
 void debug_parsed_cmd(parsed_cmd_t flags);
 
 
 void sig_handler(int sig){
-    #ifdef DEBUG
-        printf("\n\nsingal\n\n");
-    #endif
 
     /* ukonci beziaci proces na popradi */
     if(sig == SIGCHLD){
-        pid_t pid = wait(NULL);
-        printf("[1] %d\n",pid);/* */
-        signal(SIGCHLD,sig_handler);
-        fflush(stdout);
+
+        if(is_bgr_proc){
+            #ifdef DEBUG
+                printf("\n\background process \n\n");
+            #endif
+            pid_t pid = wait(NULL);
+            printf("[1] %d\n",pid);/* */
+            fflush(stdout);
+        }else{
+            /* ak nie je background process, tak pockaj */
+            wait(NULL);
+        }
     }
 
 }
@@ -235,6 +242,7 @@ void call_cmd(void){
 
 
     /* parsovanie prikazu */
+     parsed_cmd_t flags;
 
     /* prazdne prikazy nespracovavaj */
     /*if(strlen(buffer) < 2) return;*/
@@ -249,11 +257,13 @@ void call_cmd(void){
     #endif
 
 
-    parsed_cmd_t flags;
-
     /* naparsuje buffer */
     parse_buffer(buffer,&flags);
 
+
+    #ifdef DEBUG
+        debug_parsed_cmd(flags);
+    #endif
 
     /* Interne prikazy */
 
@@ -362,7 +372,20 @@ void call_execvp(parsed_cmd_t flags){
 
     pid_t id;
     int status;
+    struct sigaction sigchild;
 
+    /* handler na osetrenie ukoncenie procesu */
+    sigchild.sa_flags = 0;
+    sigchild.sa_handler = sig_handler;
+    sigemptyset(&sigchild.sa_mask);
+
+    if(sigaction(SIGCHLD,&sigchild,NULL)){
+        printf("sigaction()");
+        exit(EXIT_FAILURE);
+    }
+
+
+    /* vykonanie prikazov */
     if((id = fork()) == -1){
         printf("fork error\n");
         exit(EXIT_FAILURE);
@@ -381,18 +404,23 @@ void call_execvp(parsed_cmd_t flags){
                 exit(EXIT_FAILURE);
             }
         }
-    }else{
-
+    }else{/* parent */
+        /* ak je na pozadi tak zobraz vystup az ked skonci */
         if(flags.background){
-            /* treba presmerovat vystup a vypisat az ked sa dokonci */
-            run_background(flags.argv);
-        }else {
-            /* pockaj na proces v popredi a */
+            run_background(flags);
+        }else{
+            /* zastav parent a pockaj na obsluzenie */
+            pause();
+        }
+        /*
+        else {
+            /* pockaj na proces v popredi a
             if(waitpid(id,&status,0) == -1){
                 printf("waitpid error\n");
                 exit(EXIT_FAILURE);
             }
         }
+        */
     }
 
 /*
@@ -436,9 +464,6 @@ void call_execvp(parsed_cmd_t flags){
 
 void redirect_output(parsed_cmd_t flags){
 
-     #ifdef DEBUG
-        debug_parsed_cmd(flags);
-    #endif
 
     /* treba vytvorit novy subor a zapisat vystup prikazu do suboru */
     int desc = open(flags.argv[flags.redirect_pos+1],O_CREAT|O_WRONLY,S_IWUSR|S_IRUSR|S_IRGRP|S_IROTH);
@@ -498,8 +523,9 @@ void redirect_input(parsed_cmd_t flags){
     return;
 }
 
-void run_background(char **argv){
+void run_background(parsed_cmd_t flags){
 
+    printf("musi byt na pozdi");
 
 
 }
