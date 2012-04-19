@@ -1,6 +1,4 @@
 #define _POSIX_C_SOURCE 199506L
-#define _XOPEN_SOURCE
-#define _XOPEN_SOURCE_EXTENDED 1
 
 /*#define DEBUG*/
 #define BUFFER_SIZE 513
@@ -23,22 +21,28 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-char *buffer;
-volatile sig_atomic_t program_exit = 0; /* ukoncenie programu */
+char *buffer;                           /* nacitny text z cmdline */
 volatile sig_atomic_t is_bgr_proc = 0;  /* urcuje ci ide o background process */
+volatile sig_atomic_t signaled = 0;     /* signalizuje ci ma pokracovat v prikaze */
 pid_t child;                            /* proces na pozadi */
 pthread_t thread_read,thread_exec;
 pthread_cond_t cond;
 pthread_mutex_t mutex;
+sigset_t sigchl_mask;                   /* obsahuje blokovane signaly v main a
+                                         * a vo vlakne read_input a prijmane vo vlakne
+                                         * exec_cmd
+                                         */
+struct sigaction sigchild;
 
-typedef struct parsed_cmd_s{
+typedef struct parsed_cmd{
     char *argv[BUFFER_SIZE];      /* naparsovane argumenty */
     int argv_length;              /* pocet argumentov */
     int background;               /* spustit na pozadi */
     int redirect;                 /* typ presmerovania */
     int redirect_pos;             /* pozicia znaku presmerovania */
-    int amp_pos;                  /* pozicia ampers. presmerovania & inak -1 */
-    int stdout;
+    int amp_pos;                  /* pozicia ampers. presmerovania */
+    int stdout_t;                 /* uchovava deskr. na stdout */
+    int stdin_t;                  /* uchovava deskr. na stdin */
 } parsed_cmd_t;
 
 
@@ -53,7 +57,7 @@ void redirect_output(parsed_cmd_t flags);
 void run_background(parsed_cmd_t flags);
 int get_char_position(char *text, char search_char);
 void debug_parsed_cmd(parsed_cmd_t flags);
-void my_exect(parsed_cmd_t flags);
+
 
 void sig_handler(int sig){
 
@@ -64,13 +68,19 @@ void sig_handler(int sig){
                 printf("\n\nbackground process \n\n");
             #endif
             is_bgr_proc = 0;
-            fflush(stdout);
         }else{
              #ifdef DEBUG
-                printf("\n\nforground process \n\n");
+                printf("\n\nforeground process \n\n");
             #endif
             /* ak nie je background process, tak pockaj */
-            wait(NULL);
+            int status;
+
+            if (waitpid(-1, &status, WNOHANG) < 0){
+                printf("waitpid failed\n");
+                return;
+            }
+
+            signaled = 1;
         }
     }
 }
@@ -86,9 +96,18 @@ int main(int argc, char* argv[], char **envp){
         return 1;
     }
 
+    sigemptyset(&sigchl_mask);
+    sigaddset(&sigchl_mask,SIGCHLD);
+
     sigact.sa_flags = 0;
     sigact.sa_handler = sig_handler;
     sigemptyset(&sigact.sa_mask);
+
+    /* treba zablokovat v main */
+    if(pthread_sigmask(SIG_BLOCK,&sigchl_mask,NULL) == -1){
+        perror("sigmask\n");
+        exit(EXIT_FAILURE);
+    }
 
     if(sigaction(SIGINT,&sigact,NULL)){
 		printf("sigaction()");
@@ -130,11 +149,13 @@ int main(int argc, char* argv[], char **envp){
         return 1;
     }
 
+
     /* vlakno spracovava jednotlive prikazy */
     if((res = pthread_create(&thread_exec,&attr,exec_cmd,NULL)) != 0){
         printf("pthread_create() error %d\n",res);
         return 1;
     }
+
 
     /* atributy uz netreba */
     if((res = pthread_attr_destroy(&attr)) != 0){
@@ -160,6 +181,12 @@ int main(int argc, char* argv[], char **envp){
 }
 
 void *read_input(void *p){
+
+    /* treba zablokovat signal sigchld pri citani */
+    if(pthread_sigmask(SIG_BLOCK,&sigchl_mask,NULL) == -1){
+        perror("sigmask\n");
+        exit(EXIT_FAILURE);
+    }
 
     int rlen;
 
@@ -212,6 +239,13 @@ void *read_input(void *p){
 }
 
 void *exec_cmd(void *p){
+
+    /* sigchld moze prijimat len pri vykonavani prikazov */
+    if(pthread_sigmask(SIG_UNBLOCK,&sigchl_mask,NULL) == -1){
+        perror("sigmask\n");
+        exit(EXIT_FAILURE);
+    }
+
 
     while(1){
 
@@ -329,7 +363,8 @@ int parse_buffer(char *buffer, parsed_cmd_t *flags){
     flags->redirect = 0;    /* default hodnota */
     flags->argv[i] = NULL;  /* na poslednu poziciu NULL */
     flags->argv_length = i; /* nastav pocet argumentov */
-    flags->stdout = dup(STDOUT_FILENO);
+    flags->stdout_t = dup(STDOUT_FILENO);
+    flags->stdin_t = dup(STDIN_FILENO);
 
     /* kontrola ci parameter neobsahuje presmerovanie vystupu/vstupu */
     for(j = 0; j < flags->argv_length; j++){
@@ -374,21 +409,17 @@ void debug_parsed_cmd(parsed_cmd_t flags){
 
 }
 
-void my_exect(parsed_cmd_t flags){
-
-}
-
 void call_execvp(parsed_cmd_t flags){
 
     pid_t id;
-    struct sigaction sigchild;
     is_bgr_proc = 0;    /* default sa spusta vzdy na popredi */
 
 
     /* handler na osetrenie ukoncenia procesu */
-    sigchild.sa_flags = 0;
     sigchild.sa_handler = sig_handler;
+    sigchild.sa_flags = SA_NOCLDSTOP;
     sigemptyset(&sigchild.sa_mask);
+
 
     if(sigaction(SIGCHLD,&sigchild,NULL)){
         printf("sigaction()");
@@ -426,11 +457,12 @@ void call_execvp(parsed_cmd_t flags){
 
         }
     }else{/* parent */
+
         /* cakaj len ak je proces v popredi */
         if(!flags.background){
-            pause();
-        }else{
+            while(!signaled) sigsuspend(&sigchild.sa_mask);
 
+            signaled = 0;
         }
     }
 
@@ -543,18 +575,16 @@ void run_background(parsed_cmd_t flags){
 
 
     }else { /* parent */
-
         pause();
-        close(pipefd[1]);
 
-        /* ak sa premerovava tak treba vypisat na stdout nie do suboru */
+        close(pipefd[1]);
+            /* ak sa premerovava tak treba vypisat na stdout nie do suboru */
         if(flags.redirect > NO_REDIRECTION){
-            dup2(flags.stdout,STDOUT_FILENO);
+            dup2(flags.stdin_t,STDOUT_FILENO);
         }
 
-
          /* zobrazi hlasku o ukonceni */
-         printf("\nDone: pid=[%d]\n",grand_child);
+         printf("\nDone: pid=[%d]\n",(int)grand_child);
 
         /* vypis zachyteny stdout */
         char buf;

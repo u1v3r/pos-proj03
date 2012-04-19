@@ -7,8 +7,7 @@ PNAME = proj03
 unameOS := $(shell sh -c 'uname -s 2>/dev/null || echo not')
 
 ifeq ($(unameOS),SunOS)
-	CC = cc
-	CFLAGS = -mt -O -o $(PNAME) $(PNAME).c -lpthread
+	CFLAGS = -Wall -lpthread -ansi -g -O -o $(PNAME) $(PNAME).c
 endif
 
 
